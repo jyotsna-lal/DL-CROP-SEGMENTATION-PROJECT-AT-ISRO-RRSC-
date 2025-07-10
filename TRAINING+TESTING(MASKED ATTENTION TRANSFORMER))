@@ -30,8 +30,8 @@ N_CLASSES = 3
 BATCH_SIZE = 16
 EPOCHS = 100
 SEED = 42
-IMAGE_DIR = r"D:\\Jyotsna_Kartik_BITS_2025\\vscode1\\model_unet\\archive\\Training_Dataset\\augmented_images6"
-MASK_DIR  = r"D:\\Jyotsna_Kartik_BITS_2025\\vscode1\\model_unet\\archive\\Training_Dataset\\augmented_masks6"
+IMAGE_DIR = r"D:\\Jyotsna_2025\\vscode1\\model_unet\\archive\\Training_Dataset\\augmented_images6"
+MASK_DIR  = r"D:\\Jyotsna_2025\\vscode1\\model_unet\\archive\\Training_Dataset\\augmented_masks6"
 
 # ------------------ LOSS & METRIC ------------------
 def multiclass_dice_coef(y_true, y_pred, smooth=1e-6):
