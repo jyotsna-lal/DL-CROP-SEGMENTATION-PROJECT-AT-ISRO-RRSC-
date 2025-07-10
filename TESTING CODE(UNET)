@@ -1,0 +1,289 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import tensorflow as tf
+from tensorflow.keras.models import load_model
+from tensorflow.keras.optimizers import Adam
+from tifffile import imread
+import random
+import os
+
+
+train_gen = DataGenerator(X_train, image_dir, mask_dir, BATCH_SIZE, (IMG_WIDTH, IMG_HEIGHT))
+val_gen   = DataGenerator(X_val,   image_dir, mask_dir, BATCH_SIZE, (IMG_WIDTH, IMG_HEIGHT))
+
+def multiclass_dice_coef(y_true, y_pred, smooth=1e-6):
+    y_true_f = tf.keras.backend.flatten(y_true)
+    y_pred_f = tf.keras.backend.flatten(y_pred)
+    intersection = tf.keras.backend.sum(y_true_f * y_pred_f)
+    return (2. * intersection + smooth) / (tf.keras.backend.sum(y_true_f) + tf.keras.backend.sum(y_pred_f) + smooth)
+
+def combined_loss(y_true, y_pred):
+    y_pred = tf.clip_by_value(y_pred, 1e-7, 1 - 1e-7)
+    y_true = tf.cast(y_true, tf.float32)
+    cce = tf.keras.losses.categorical_crossentropy(y_true, y_pred)
+    dice_loss = 1 - multiclass_dice_coef(y_true, y_pred)
+    return cce + dice_loss
+
+
+model = load_model("best_unet_model_1/07/25.h", compile=False)
+
+
+model.compile(
+    optimizer=Adam(1e-4),
+    loss=combined_loss,
+    metrics=['accuracy', multiclass_dice_coef]
+)
+
+# --- Evaluate model on validation set ---
+val_loss, val_acc, val_dice = model.evaluate(val_gen, verbose=1)
+print(f"\n Final Evaluation on Validation Set:")
+print(f"    Loss: {val_loss:.4f}")
+print(f"    Accuracy: {val_acc:.4f}")
+print(f"    Dice Coefficient: {val_dice:.4f}")
+
+# --- Visualize predictions ) ---
+max_samples = 200  
+sample_count = 0
+
+indices = list(range(len(val_gen)))  # use all batches
+
+for idx in indices:
+    images, masks = val_gen[idx]
+    batch_ids = val_gen.id_list[idx * val_gen.batch_size : (idx + 1) * val_gen.batch_size]
+
+    for i in range(len(images)):
+        image = images[i]                            # Shape: (256, 256, 3)
+        true_mask = np.argmax(masks[i], axis=-1)     # Decode one-hot to label map
+        pred_probs = model.predict(image[np.newaxis, ...])[0]  # Shape: (256, 256, 3)
+        pred_mask = np.argmax(pred_probs, axis=-1)   # Argmax to get class label per pixel
+
+        # --- Normalize image for display ---
+        image_disp = image.copy()
+        for c in range(3):
+            ch = image_disp[:, :, c]
+            image_disp[:, :, c] = (ch - ch.min()) / (ch.max() - ch.min()) if ch.max() > ch.min() else 0
+
+        # --- Get image ID (for reference) ---
+        image_id = batch_ids[i] if i < len(batch_ids) else "Unknown"
+
+        # --- Plot ---
+        plt.figure(figsize=(12, 4))
+        plt.suptitle(f"Image ID: {image_id}", fontsize=14)
+
+        plt.subplot(1, 3, 1)
+        plt.imshow(image_disp)
+        plt.title("Input RGB Image (Normalized)")
+        plt.axis("off")
+
+        plt.subplot(1, 3, 2)
+        plt.imshow(true_mask, cmap="jet", vmin=0, vmax=2)
+        plt.title("Ground Truth Mask")
+        plt.axis("off")
+
+        plt.subplot(1, 3, 3)
+        plt.imshow(pred_mask, cmap="jet", vmin=0, vmax=2)
+        plt.title("Predicted Mask")
+        plt.axis("off")
+
+        plt.tight_layout()
+        plt.show()
+
+        sample_count += 1
+        if sample_count >= max_samples:
+            break
+
+import numpy as np
+import matplotlib.pyplot as plt
+import tensorflow as tf
+from tensorflow.keras.models import load_model
+from tensorflow.keras.optimizers import Adam
+from tifffile import imread
+import random
+import os
+
+# --- Custom Dice Metric & Loss (Must match training!) ---
+train_gen = DataGenerator(X_train, image_dir, mask_dir, BATCH_SIZE, (IMG_WIDTH, IMG_HEIGHT))
+val_gen   = DataGenerator(X_val,   image_dir, mask_dir, BATCH_SIZE, (IMG_WIDTH, IMG_HEIGHT))
+
+def multiclass_dice_coef(y_true, y_pred, smooth=1e-6):
+    y_true_f = tf.keras.backend.flatten(y_true)
+    y_pred_f = tf.keras.backend.flatten(y_pred)
+    intersection = tf.keras.backend.sum(y_true_f * y_pred_f)
+    return (2. * intersection + smooth) / (tf.keras.backend.sum(y_true_f) + tf.keras.backend.sum(y_pred_f) + smooth)
+
+def combined_loss(y_true, y_pred):
+    y_pred = tf.clip_by_value(y_pred, 1e-7, 1 - 1e-7)
+    y_true = tf.cast(y_true, tf.float32)
+    cce = tf.keras.losses.categorical_crossentropy(y_true, y_pred)
+    dice_loss = 1 - multiclass_dice_coef(y_true, y_pred)
+    return cce + dice_loss
+
+# --- Load the trained model ---
+model = load_model("best_unet_model_1/07/25.h5", compile=False)
+
+# Recompile with correct loss and metric
+model.compile(
+    optimizer=Adam(1e-4),
+    loss=combined_loss,
+    metrics=['accuracy', multiclass_dice_coef]
+)
+
+# --- Evaluate model on validation set ---
+val_loss, val_acc, val_dice = model.evaluate(val_gen, verbose=1)
+print(f"\n Final Evaluation on Validation Set:")
+print(f"    Loss: {val_loss:.4f}")
+print(f"    Accuracy: {val_acc:.4f}")
+print(f"    Dice Coefficient: {val_dice:.4f}")
+
+# --- Visualize predictions (CHANGEABLE: N samples from val_gen) ---
+max_samples = 200  
+sample_count = 0
+
+indices = list(range(len(val_gen)))  # use all batches
+
+for idx in indices:
+    images, masks = val_gen[idx]
+    batch_ids = val_gen.id_list[idx * val_gen.batch_size : (idx + 1) * val_gen.batch_size]
+
+    for i in range(len(images)):
+        image = images[i]                            # Shape: (256, 256, 3)
+        true_mask = np.argmax(masks[i], axis=-1)     # Decode one-hot to label map
+        pred_probs = model.predict(image[np.newaxis, ...])[0]  # Shape: (256, 256, 3)
+        pred_mask = np.argmax(pred_probs, axis=-1)   # Argmax to get class label per pixel
+
+        # --- Normalize image for display ---
+        image_disp = image.copy()
+        for c in range(3):
+            ch = image_disp[:, :, c]
+            image_disp[:, :, c] = (ch - ch.min()) / (ch.max() - ch.min()) if ch.max() > ch.min() else 0
+
+        # --- Get image ID (for reference) ---
+        image_id = batch_ids[i] if i < len(batch_ids) else "Unknown"
+
+        # --- Plot ---
+        plt.figure(figsize=(12, 4))
+        plt.suptitle(f" Image ID: {image_id}", fontsize=14)
+
+        plt.subplot(1, 3, 1)
+        plt.imshow(image_disp)
+        plt.title("Input RGB Image (Normalized)")
+        plt.axis("off")
+
+        plt.subplot(1, 3, 2)
+        plt.imshow(true_mask, cmap="jet", vmin=0, vmax=2)
+        plt.title("Ground Truth Mask")
+        plt.axis("off")
+
+        plt.subplot(1, 3, 3)
+        plt.imshow(pred_mask, cmap="jet", vmin=0, vmax=2)
+        plt.title("Predicted Mask")
+        plt.axis("off")
+
+        plt.tight_layout()
+        plt.show()
+
+        sample_count += 1
+        if sample_count >= max_samples:
+            break
+    if sample_count >= max_samples:
+        break
+    if sample_count >= max_samples:
+        break
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+import cv2
+from tensorflow.keras.models import load_model
+from collections import Counter
+
+# --- Configuration ---
+NUM_CLASSES = 3
+MODEL_PATH = "best_unet_model_1/07/25.h5"
+TEST_FOLDER = r"D:/Jyotsna_Kartik_BITS_2025/prediction_folder"
+SAVE_FOLDER = os.path.join(os.path.dirname(TEST_FOLDER), "predicted_masks")
+os.makedirs(SAVE_FOLDER, exist_ok=True)
+
+# --- Load model ---
+model = load_model(MODEL_PATH, compile=False)
+print(" Model loaded.")
+
+# --- Image preprocessing ---
+def load_and_preprocess_image(image_path):
+    img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED).astype('float32')
+    if img.ndim == 3 and img.shape[2] >= 3:
+        img = img[:, :, :3]
+    elif img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+    max_val = np.max(img)
+    img = img / max_val if max_val != 0 else img
+    return img
+
+# --- Load test images ---
+image_paths = sorted([
+    os.path.join(TEST_FOLDER, f)
+    for f in os.listdir(TEST_FOLDER)
+    if f.lower().endswith(".tif")
+])
+print(f" Found {len(image_paths)} test images.")
+
+# --- Load all into memory
+all_images = np.array([load_and_preprocess_image(p) for p in image_paths])
+print(" All images loaded into memory:", all_images.shape)
+
+# --- Predict
+all_preds = model.predict(all_images, batch_size=16, verbose=1)
+confidences = np.max(all_preds, axis=-1)
+classes = np.argmax(all_preds, axis=-1)
+# CONF_THRESHOLD = 0.7
+# all_masks = np.where(confidences > CONF_THRESHOLD, classes, 0)
+
+# --- Save all masks
+for idx, (mask, path) in enumerate(zip(all_masks, image_paths)):
+    base_name = os.path.splitext(os.path.basename(path))[0]
+    save_path = os.path.join(SAVE_FOLDER, base_name + ".png")
+    cv2.imwrite(save_path, (mask * 85).astype(np.uint8))
+
+print(f"\n All predicted masks saved to: {SAVE_FOLDER}")
+
+
+IMAGES_PER_FIG = 5
+for i in range(0, len(all_images), IMAGES_PER_FIG):
+    plt.figure(figsize=(14, IMAGES_PER_FIG * 2))
+    for j in range(IMAGES_PER_FIG):
+        idx = i + j
+        if idx >= len(all_images): break
+        img = (all_images[idx] * 255).astype(np.uint8)
+        mask = all_masks[idx]
+        fname = os.path.basename(image_paths[idx])
+
+        # Original
+        plt.subplot(IMAGES_PER_FIG, 2, j * 2 + 1)
+        plt.imshow(img)
+        plt.title(f"Original: {fname}")
+        plt.axis('off')
+
+        # Mask
+        plt.subplot(IMAGES_PER_FIG, 2, j * 2 + 2)
+        plt.imshow(mask, cmap='jet')
+        plt.title("Predicted Mask")
+        plt.axis('off')
+
+    plt.tight_layout()
+    plt.show()
+
+# --- Class summary per image
+print("\n Predicted Classes Per Image:\n")
+all_present_classes = []
+for i, mask in enumerate(all_masks):
+    present_classes = np.unique(mask)
+    all_present_classes.extend(present_classes)
+    class_labels = [f"Class {c}" for c in present_classes]
+    print(f"[{i+1:03}] {os.path.basename(image_paths[i])} → {', '.join(class_labels)}")
+
+# --- Total summary
+summary = dict(Counter(all_present_classes))
+print("\n Total Classes Detected in Entire Dataset:")
+for k in sorted(summary):
+    print(f"Class {k}: {summary[k]} images (may include duplicates)")
+
+
