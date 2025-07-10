@@ -125,5 +125,122 @@ Interactive plots: 3-panel visualizations per sample
 
 
 
-MASKED ATTENTION TRANSFORMER
+**Masked Attention Transformer + DUC for Semantic Segmentation of Crops from Satellite Imagery**
+This repository implements a complete end-to-end semantic segmentation framework using a Transformer-based deep learning architecture with PixelShuffle (Dense Upsampling Convolution - DUC) for full-resolution multi-class mask generation. The model is trained and evaluated on real-world, high-resolution .tif satellite images, with specific focus on segmenting different crop types: background, pomegranate, and date palm.
+
+Dataset and Preprocessing
+The dataset consists of two primary directories:
+augmented_images6/: Contains satellite .tif images in the format image_<id>.tif
+augmented_masks6/: Contains corresponding segmentation masks in the format mask_<id>.tif
+The masks use the following raw label values:
+
+0 → Background
+
+1 → Pomegranate
+
+4 → Date Palm
+
+During preprocessing, label 4 is remapped to 2 to form a consistent 3-class segmentation setup: [0, 1, 2]. Only valid .tif files are retained, while auxiliary and corrupt files are excluded using a validation routine that attempts to load each file via TiffFile. The matched image-mask pairs are split into training and validation sets (80:20) using train_test_split.
+
+Each image and mask is resized to a uniform resolution of 256×256. All masks are one-hot encoded into shape (256, 256, 3) before training. Input images are normalized band-wise using their maximum pixel intensity to ensure stability during model inference.
+
+Model Architecture: Transformer with DUC
+The implemented model consists of the following components:
+
+Patch Embedding:
+The input image of shape (256, 256, 3) is projected into a sequence of tokens using a Conv2D layer with kernel size and stride equal to the patch size (16×16). This produces a flattened sequence of embeddings with dimension d_model = 256.
+
+Positional Embedding:
+Learnable positional encodings are added to the patch embeddings to retain spatial context.
+
+Transformer Blocks:
+The encoded sequence passes through a stack of 4 identical transformer blocks. Each block consists of:
+
+Layer normalization
+
+Multi-head self-attention (8 heads)
+
+MLP with GELU activation
+
+Residual connections
+
+Reshape and Convolution:
+The sequence is reshaped back to a spatial feature map of shape (16, 16, 256). Two convolutional layers refine the feature representation.
+
+DUC Module with PixelShuffle2D:
+A final convolutional layer produces a feature map with N_CLASSES × (4²) channels, which is then upsampled using PixelShuffle (factor 4), followed by bilinear upsampling to restore full input resolution (256, 256).
+
+Output Layer:
+A softmax layer generates per-pixel class probabilities across three classes.
+
+Loss Function and Metrics
+The model uses a compound loss function to balance class accuracy and spatial segmentation quality:
+
+Combined Loss = Categorical Crossentropy + (1 - Multi-class Dice Coefficient)
+
+The Dice coefficient is computed per batch using flattened vectors and smooth regularization to handle zero denominators. The model tracks two metrics during training: categorical accuracy and the Dice coefficient.
+
+Training Procedure
+Training is conducted using the Keras fit API with the following configuration:
+
+Optimizer: Adam (learning_rate = 1e-4)
+
+Batch size: 16
+
+Epochs: 100
+
+Callbacks:
+
+ModelCheckpoint: Saves the model with the best validation accuracy
+
+EarlyStopping: Stops training if no improvement in validation accuracy for 15 epochs
+
+ReduceLROnPlateau: Reduces learning rate by a factor of 0.1 after 5 epochs of no validation loss improvement
+
+The final model is saved as final_trained_model.h5.
+
+Evaluation
+Post-training, the model is evaluated on the validation set using the same data generator. It computes:
+
+Total loss (combined)
+
+Categorical accuracy
+
+Multi-class Dice coefficient
+
+These metrics provide a comprehensive assessment of segmentation quality and class-level accuracy on unseen validation data.
+
+Inference on Unseen Test Images
+A separate script performs inference on high-resolution .tif test images located in a specified folder (e.g., Chips_subset_9Feb_2024_for_test). The steps are as follows:
+
+Band Selection:
+From multi-band .tif images, only Bands 2, 3, and 4 are used as RGB input. If the image is grayscale, it is broadcasted across three channels.
+
+Normalization:
+Images are normalized using the global maximum pixel value to bring values into the [0, 1] range.
+
+Model Prediction:
+The trained model predicts softmax class probabilities for each pixel. The final mask is obtained by taking the argmax across the channel dimension, producing class-wise masks of shape (256, 256).
+
+Saving Outputs:
+The predicted masks are saved in grayscale .tif format with filenames matching their corresponding inputs. These are stored in the predicted_masks_output/ directory.
+
+Visualization:
+For each test image, a side-by-side plot is generated showing:
+
+The normalized RGB image
+
+The predicted segmentation mask using a Jet colormap
+
+Output Format
+Each predicted mask is a grayscale .tif file with pixel values:
+
+0 for background
+
+1 for pomegranate
+
+2 for date palm
+
+The masks are suitable for downstream processing or overlay with geographic metadata if needed.
+
 
