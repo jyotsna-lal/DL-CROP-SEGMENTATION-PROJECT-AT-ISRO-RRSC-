@@ -1,0 +1,238 @@
+import os
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras import layers, models, optimizers, backend as K
+from tensorflow.keras.metrics import CategoricalAccuracy
+from tifffile import imread, TiffFile
+from sklearn.model_selection import train_test_split
+import cv2
+import matplotlib.pyplot as plt
+
+# ------------------ GPU INFO ------------------
+print(f"TensorFlow version: {tf.__version__}")
+gpus = tf.config.list_physical_devices('GPU')
+print(f"GPUs detected: {len(gpus)}")
+if gpus:
+    try:
+        for i, gpu in enumerate(gpus):
+            print(f"  ↪ GPU {i}: {gpu.name}")
+            tf.config.experimental.set_memory_growth(gpu, True)
+        print("Memory growth enabled for all available GPUs.")
+    except RuntimeError as e:
+        print(f"Error configuring GPU memory growth: {e}")
+else:
+    print("No GPU devices found.")
+
+# ------------------ CONFIG ------------------
+IMG_HEIGHT, IMG_WIDTH = 256, 256
+IMG_SHAPE = (IMG_HEIGHT, IMG_WIDTH, 3)
+N_CLASSES = 3
+BATCH_SIZE = 16
+EPOCHS = 100
+SEED = 42
+IMAGE_DIR = r"D:\\Jyotsna_Kartik_BITS_2025\\vscode1\\model_unet\\archive\\Training_Dataset\\augmented_images6"
+MASK_DIR  = r"D:\\Jyotsna_Kartik_BITS_2025\\vscode1\\model_unet\\archive\\Training_Dataset\\augmented_masks6"
+
+# ------------------ LOSS & METRIC ------------------
+def multiclass_dice_coef(y_true, y_pred, smooth=1e-6):
+    y_true = tf.cast(y_true, tf.float32)
+    y_pred = tf.cast(y_pred, tf.float32)
+    y_true = tf.reshape(y_true, (tf.shape(y_true)[0], -1))
+    y_pred = tf.reshape(y_pred, (tf.shape(y_pred)[0], -1))
+    intersection = tf.reduce_sum(y_true * y_pred, axis=1)
+    denominator = tf.reduce_sum(y_true + y_pred, axis=1)
+    dice = tf.reduce_mean((2. * intersection + smooth) / (denominator + smooth))
+    return dice
+
+def combined_loss(y_true, y_pred):
+    y_pred = K.clip(y_pred, 1e-7, 1 - 1e-7)
+    cce = tf.keras.losses.categorical_crossentropy(y_true, y_pred)
+    dice = 1 - multiclass_dice_coef(y_true, y_pred)
+    return cce + dice
+
+# ------------------ HELPERS ------------------
+def remap_mask_labels(mask):
+    remapped = np.copy(mask)
+    remapped[mask == 4] = 2
+    return remapped
+
+def is_valid_tiff_file(fname):
+    return fname.endswith((".tif", ".tiff")) and not fname.endswith(('.aux', '.xml'))
+
+def extract_id(filename, prefix):
+    return os.path.splitext(filename)[0].replace(prefix, "")
+
+def is_truly_tiff(path):
+    try:
+        with TiffFile(path) as tif:
+            _ = tif.pages[0]
+        return True
+    except:
+        return False
+
+# ------------------ DATASET ------------------
+image_files = [f for f in os.listdir(IMAGE_DIR) if is_valid_tiff_file(f) and f.startswith("image_")]
+mask_files  = [f for f in os.listdir(MASK_DIR)  if is_valid_tiff_file(f) and f.startswith("mask_")]
+
+image_map = {extract_id(f, "image_"): f for f in image_files}
+mask_map  = {extract_id(f, "mask_"): f for f in mask_files}
+
+common_ids = sorted(set(image_map) & set(mask_map))
+valid_ids = [i for i in common_ids if is_truly_tiff(os.path.join(IMAGE_DIR, image_map[i])) and is_truly_tiff(os.path.join(MASK_DIR, mask_map[i]))]
+
+X_train, X_val = train_test_split(valid_ids, test_size=0.2, random_state=SEED)
+
+# ------------------ DATA GENERATOR ------------------
+class DataGenerator(tf.keras.utils.Sequence):
+    def __init__(self, id_list, image_dir, mask_dir, batch_size, img_size, shuffle=True):
+        self.id_list = id_list
+        self.image_dir = image_dir
+        self.mask_dir = mask_dir
+        self.batch_size = batch_size
+        self.img_size = img_size
+        self.shuffle = shuffle
+        self.on_epoch_end()
+
+    def __len__(self):
+        return int(np.ceil(len(self.id_list) / self.batch_size))
+
+    def __getitem__(self, index):
+        batch_ids = self.id_list[index * self.batch_size:(index + 1) * self.batch_size]
+        images, masks = [], []
+        for id in batch_ids:
+            img = imread(os.path.join(self.image_dir, f"image_{id}.tif"))
+            if img.ndim == 2:
+                img = np.stack([img] * 3, axis=-1)
+            elif img.ndim == 3 and img.shape[2] >= 3:
+                img = img[:, :, :3]
+            else:
+                raise ValueError(f"Unexpected image shape: {img.shape}")
+
+            img = cv2.resize(img, self.img_size).astype(np.float32)
+            img = img / (np.max(img) + 1e-6)
+
+            mask = imread(os.path.join(self.mask_dir, f"mask_{id}.tif"))
+            mask = cv2.resize(mask, self.img_size, interpolation=cv2.INTER_NEAREST)
+            remapped = remap_mask_labels(mask)
+            one_hot = tf.keras.utils.to_categorical(remapped, num_classes=N_CLASSES).astype(np.float32)
+
+            images.append(img)
+            masks.append(one_hot)
+
+        return np.array(images), np.array(masks)
+
+    def on_epoch_end(self):
+        if self.shuffle:
+            np.random.shuffle(self.id_list)
+
+train_gen = DataGenerator(X_train, IMAGE_DIR, MASK_DIR, BATCH_SIZE, (IMG_WIDTH, IMG_HEIGHT))
+val_gen   = DataGenerator(X_val,   IMAGE_DIR, MASK_DIR, BATCH_SIZE, (IMG_WIDTH, IMG_HEIGHT))
+
+# ------------------ DUC MODULE ------------------
+class PixelShuffle2D(layers.Layer):
+    def __init__(self, upsampling_factor=2, **kwargs):
+        super(PixelShuffle2D, self).__init__(**kwargs)
+        self.upsampling_factor = upsampling_factor
+
+    def call(self, inputs):
+        return tf.nn.depth_to_space(inputs, self.upsampling_factor)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"upsampling_factor": self.upsampling_factor})
+        return config
+
+# ------------------ MODEL ------------------
+def patch_embedding(inputs, patch_size=16, d_model=256):
+    x = layers.Conv2D(d_model, patch_size, patch_size, padding='valid')(inputs)
+    return layers.Reshape((-1, d_model))(x)
+
+def transformer_block(x, num_heads=8, mlp_dim=512, dropout=0.1):
+    att = layers.LayerNormalization()(x)
+    att = layers.MultiHeadAttention(num_heads, key_dim=x.shape[-1], dropout=dropout)(att, att)
+    x = layers.Add()([x, att])
+    mlp = layers.LayerNormalization()(x)
+    mlp = layers.Dense(mlp_dim, activation='gelu')(mlp)
+    mlp = layers.Dropout(dropout)(mlp)
+    mlp = layers.Dense(x.shape[-1])(mlp)
+    return layers.Add()([x, mlp])
+
+def build_model():
+    inputs = layers.Input(shape=IMG_SHAPE)
+    x = patch_embedding(inputs, patch_size=16, d_model=256)
+    positions = tf.range(start=0, limit=tf.shape(x)[1], delta=1)
+    pos_embedding = layers.Embedding(input_dim=10000, output_dim=256)(positions)
+    x = x + pos_embedding
+    for _ in range(4):
+        x = transformer_block(x)
+    h, w = IMG_HEIGHT // 16, IMG_WIDTH // 16
+    x = layers.Reshape((h, w, 256))(x)
+    x = layers.Conv2D(256, kernel_size=3, padding='same', activation='relu')(x)
+    x = layers.Conv2D(N_CLASSES * (4**2), kernel_size=1, padding='same')(x)
+    x = PixelShuffle2D(upsampling_factor=4)(x)
+    x = layers.UpSampling2D(size=(4, 4), interpolation='bilinear')(x)
+    outputs = layers.Softmax()(x)
+    return models.Model(inputs, outputs, name="Transformer_DUC_FullRes")
+
+# ------------------ CALLBACKS ------------------
+checkpoint_cb = tf.keras.callbacks.ModelCheckpoint("best_model.h5", save_best_only=True, monitor='val_accuracy', mode='max', verbose=1)
+earlystop_cb = tf.keras.callbacks.EarlyStopping(monitor='val_accuracy', patience=15, restore_best_weights=True, verbose=1)
+reducelr_cb = tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.1, patience=5, verbose=1)
+callbacks = [checkpoint_cb, earlystop_cb, reducelr_cb]
+
+# ------------------ COMPILE & TRAIN ------------------
+model = build_model()
+model.compile(optimizer=optimizers.Adam(learning_rate=1e-4),
+              loss=combined_loss,
+              metrics=[CategoricalAccuracy(name='accuracy'), multiclass_dice_coef])
+
+model.summary()
+
+history = model.fit(train_gen,
+                    validation_data=val_gen,
+                    epochs=EPOCHS,
+                    callbacks=callbacks,
+                    verbose=1)
+
+# ------------------ SAVE FINAL MODEL ------------------
+model.save("final_trained_model.h5")
+print("Model training complete and saved.")
+
+# ------------------ EVALUATE ------------------
+val_loss, val_acc, val_dice = model.evaluate(val_gen, verbose=1)
+print(f"\nFinal Evaluation on Validation Set:\n   ➤ Loss: {val_loss:.4f}\n   ➤ Accuracy: {val_acc:.4f}\n   ➤ Dice Coefficient: {val_dice:.4f}")
+
+# ------------------ VISUALIZE ------------------
+def visualize_predictions(model, generator, num_samples=10):
+    import random
+    sample_count = 0
+    indices = list(range(len(generator)))
+    random.shuffle(indices)
+    for idx in indices:
+        images, masks = generator[idx]
+        for i in range(len(images)):
+            image = images[i]
+            true_mask = np.argmax(masks[i], axis=-1)
+            pred_probs = model.predict(image[np.newaxis, ...])[0]
+            pred_mask = np.argmax(pred_probs, axis=-1)
+            plt.figure(figsize=(12, 4))
+            plt.subplot(1, 3, 1)
+            plt.imshow(np.clip(image * 255, 0, 255).astype(np.uint8))
+            plt.title("Input Image")
+            plt.axis("off")
+            plt.subplot(1, 3, 2)
+            plt.imshow(true_mask, cmap='jet', vmin=0, vmax=N_CLASSES-1)
+            plt.title("Ground Truth Mask")
+            plt.axis("off")
+            plt.subplot(1, 3, 3)
+            plt.imshow(pred_mask, cmap='jet', vmin=0, vmax=N_CLASSES-1)
+            plt.title("Predicted Mask")
+            plt.axis("off")
+            plt.tight_layout()
+            plt.show()
+            sample_count += 1
+            if sample_count >= num_samples:
+                return
+
+# ------------------ CALL VISUALIZATION ------------------
+visualize_predictions(model, val_gen, num_samples=10)
